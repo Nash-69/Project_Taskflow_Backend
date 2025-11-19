@@ -116,13 +116,15 @@ def create_app():
         "code": 500,
         "message": "An internal server error occurred."
     }), 500
+
+    
     CORS(
     app,
-    resources={r"/auth/*": {"origins": "http://localhost:5173"},
-               r"/user/*": {"origins": "http://localhost:5173"},
-               r"/notifications/*": {"origins": "http://localhost:5173"}},
+    resources={r"/auth/*": {"origins": "http://localhost:3000"},
+               r"/user/*": {"origins": "http://localhost:3000"},
+               r"/notifications/*": {"origins": "http://localhost:3000"}},
     supports_credentials=True,
     allow_headers=["Content-Type", "Authorization"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS" ]
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
     )
     return app

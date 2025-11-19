@@ -187,7 +187,7 @@ def google_callback():
     #     }
     # }), 200
 
-    frontend_url = ""
+    frontend_url = "http://localhost:3000/auth/callback"
     user_data = {
         'user_id': user.user_id,
         'name': user.name,
@@ -260,7 +260,7 @@ def github_callback():
     #     }
     # }), 200
 
-    frontend_url = ""
+    frontend_url = "http://localhost:3000/auth/callback"
     user_data = {
         'user_id': user.user_id,
         'name': user.name,
