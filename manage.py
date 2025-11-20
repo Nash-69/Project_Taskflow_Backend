@@ -4,6 +4,10 @@ from app import create_app, db
 
 app = create_app()
 
+if app.config.get("TESTING"):
+    print("ERROR: Refusing to run database management commands in TEST mode.")
+    exit(1)
+
 def init_db():
     """Initialize the database."""
     with app.app_context():

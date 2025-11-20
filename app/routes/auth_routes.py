@@ -192,7 +192,8 @@ def google_callback():
         'user_id': user.user_id,
         'name': user.name,
         'email': user.email,
-        'provider': user.provider
+        'provider': user.provider,
+        'created_at': user.created_at.isoformat() if user.created_at else None
     }
 
     params = urlencode({
@@ -265,7 +266,8 @@ def github_callback():
         'user_id': user.user_id,
         'name': user.name,
         'email': user.email,
-        'provider': user.provider
+        'provider': user.provider,
+        'created_at': user.created_at.isoformat() if user.created_at else None
     }
 
     params = urlencode({
