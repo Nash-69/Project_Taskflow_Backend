@@ -43,7 +43,7 @@ def error_response(message: str, status_code: int = 400, errors: Optional[dict] 
     }
     
     if errors:
-        response['details'] = errors
+        response['errors'] = errors
     
     return jsonify(response), status_code
 
