@@ -9,6 +9,7 @@ from flask_jwt_extended import get_jwt_identity, jwt_required
 from datetime import date, datetime,timezone
 from sqlalchemy import func
 from app.utils.s3_helper import upload_to_s3,delete_from_s3
+from sqlalchemy.orm.attributes import flag_modified
 import logging
 
 task_bp = Blueprint("task_bp",__name__)
@@ -302,7 +303,52 @@ def get_upcoming_tasks():
 #**************************************************************************************************
 
 
-# Create a new task
+def format_validation_errors(validation_error):
+    """
+    Convert Pydantic ValidationError into user-friendly error messages
+    """
+    errors = []
+    for error in validation_error.errors():
+        field = error['loc'][0] if error['loc'] else 'unknown'
+        message = error['msg']
+        error_type = error['type']
+        
+        # Customize messages for better UX
+        if 'value_error' in error_type:
+            # These are our custom validators
+            errors.append({
+                'field': field,
+                'message': message,
+                'type': 'validation_error'
+            })
+        elif 'missing' in error_type:
+            errors.append({
+                'field': field,
+                'message': f'{field.capitalize()} is required',
+                'type': 'missing_field'
+            })
+        elif 'string_too_short' in error_type:
+            errors.append({
+                'field': field,
+                'message': f'{field.capitalize()} is too short',
+                'type': 'length_error'
+            })
+        elif 'string_too_long' in error_type:
+            errors.append({
+                'field': field,
+                'message': f'{field.capitalize()} is too long (max 200 characters)',
+                'type': 'length_error'
+            })
+        else:
+            errors.append({
+                'field': field,
+                'message': message,
+                'type': error_type
+            })
+    
+    return errors
+
+
 @task_bp.route('/', methods=['POST'])
 @jwt_required()
 def create_task():
@@ -310,7 +356,7 @@ def create_task():
     logger.info(f"Creating new task for user_id: {user_id}")
 
     try:
-        # Validate request data
+        # Validate request data with Pydantic
         data = TaskCreateSchema(**request.form.to_dict())  
 
         # Handle multiple files
@@ -320,23 +366,35 @@ def create_task():
         if files:
             try:
                 for file in files:
-                    url = upload_to_s3(file) 
-                    if url:
-                        image_urls.append(url)
-                    else:
-                        raise Exception(f"Error uploading file {file.name} to S3.")
+                    if file and file.filename:
+                        url = upload_to_s3(file) 
+                        if url:
+                            image_urls.append(url)
+                        else:
+                            raise Exception(f"Failed to upload file {file.filename} to S3.")
             except Exception as e:
-                logger.error(f"File upload failed during task creation for user {user_id}.")
-                return error_response(f"File upload failed: {str(e)}", 500)
+                logger.error(f"File upload failed during task creation for user {user_id}: {str(e)}")
+                return error_response(
+                    message="File upload failed. Please try again or contact support.",
+                    status_code=500,
+                    errors=[{
+                        'field': 'images',
+                        'message': str(e),
+                        'type': 'upload_error'
+                    }]
+                )
+
+        # IMPORTANT: data.due_date is now a string (YYYY-MM-DD) from the schema
+        # Parse it into a date object for the database
+        due_date_obj = datetime.strptime(data.due_date, "%Y-%m-%d").date()
 
         # Create new task
-       
         new_task = Task(
             title=data.title,
             description=data.description,
             status=StatusEnum.PENDING,
             priority=data.priority,
-            due_date=data.due_date,
+            due_date=due_date_obj,  # Use the parsed date object
             user_id=user_id,
             images=image_urls  
         )
@@ -351,18 +409,35 @@ def create_task():
         )
     
     except ValidationError as e:
-        logger.warning(f"Task creation pydantic validation failed for user {user_id}.")
-        return error_response(message=str(e), status_code=400)
+        logger.warning(f"Task creation validation failed for user {user_id}: {e.errors()}")
+        formatted_errors = format_validation_errors(e)
+        
+        # Create a user-friendly error message
+        error_message = "Please fix the following errors:"
+        if len(formatted_errors) == 1:
+            error_message = formatted_errors[0]['message']
+        
+        return error_response(
+            message=error_message,
+            status_code=400,
+            errors=formatted_errors
+        )
     
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Failed to create task for user {user_id}.")
-        return error_response(f"Failed to create task: {str(e)}", 500)
+        logger.error(f"Failed to create task for user {user_id}: {str(e)}")
+        return error_response(
+            message="Failed to create task. Please try again.",
+            status_code=500,
+            errors=[{
+                'field': 'general',
+                'message': str(e),
+                'type': 'server_error'
+            }]
+        )
 
 
-
-
-from sqlalchemy.orm.attributes import flag_modified
+# Replace the update_task function with this updated version:
 
 @task_bp.route('/<int:task_id>', methods=['PUT'])
 @jwt_required()
@@ -376,64 +451,132 @@ def update_task(task_id):
 
         if not task:
             logger.warning(f"Task not found for update - task_id: {task_id}, user_id: {user_id}")
-            return error_response('Task not found', 404)
+            return error_response(
+                message='Task not found',
+                status_code=404,
+                errors=[{
+                    'field': 'task_id',
+                    'message': f'No task found with ID {task_id}',
+                    'type': 'not_found'
+                }]
+            )
 
+        # Validate update data
         data = TaskUpdateSchema(**request.form.to_dict())
 
+        # Handle file uploads
         files = request.files.getlist("images")
         image_urls = []
-        for file in files:
-            if file and file.filename:
-                url = upload_to_s3(file)
-                if url:
-                    image_urls.append(url)
+        
+        if files:
+            try:
+                for file in files:
+                    if file and file.filename:
+                        url = upload_to_s3(file)
+                        if url:
+                            image_urls.append(url)
+                        else:
+                            raise Exception(f"Failed to upload {file.filename}")
+            except Exception as e:
+                logger.error(f"File upload failed during task update: {str(e)}")
+                return error_response(
+                    message="File upload failed",
+                    status_code=500,
+                    errors=[{
+                        'field': 'images',
+                        'message': str(e),
+                        'type': 'upload_error'
+                    }]
+                )
 
+        # Update fields
+        updated_fields = []
+        
         if data.title is not None:
             task.title = data.title
+            updated_fields.append('title')
+            
         if data.description is not None:
             task.description = data.description
+            updated_fields.append('description')
+            
         if data.status is not None:
-            task.status = data.status
-            task.status = StatusEnum(data.status.upper())
+            try:
+                task.status = StatusEnum(data.status.upper())
+                updated_fields.append('status')
+            except ValueError:
+                return error_response(
+                    message=f"Invalid status: {data.status}",
+                    status_code=400,
+                    errors=[{
+                        'field': 'status',
+                        'message': f'Status must be one of: PENDING, COMPLETED, CANCELLED',
+                        'type': 'invalid_enum'
+                    }]
+                )
+                
         if data.priority is not None:
-            task.priority = data.priority
-            task.priority = PriorityEnum(data.priority.upper())
+            try:
+                task.priority = PriorityEnum(data.priority.upper())
+                updated_fields.append('priority')
+            except ValueError:
+                return error_response(
+                    message=f"Invalid priority: {data.priority}",
+                    status_code=400,
+                    errors=[{
+                        'field': 'priority',
+                        'message': f'Priority must be one of: LOW, MEDIUM, HIGH',
+                        'type': 'invalid_enum'
+                    }]
+                )
+                
         if data.due_date is not None:
-            task.due_date = data.due_date
+            # Parse the date string into a date object
+            due_date_obj = datetime.strptime(data.due_date, "%Y-%m-%d").date()
+            task.due_date = due_date_obj
+            updated_fields.append('due_date')
 
- 
+        # Append new images
         if image_urls:
             if not task.images:
                 task.images = []
             task.images.extend(image_urls)
             flag_modified(task, "images")
+            updated_fields.append('images')
+            
         db.session.commit()
 
-        logger.info(f"Task {task_id} updated successfully for user id {user_id}, fields: {task}")
+        logger.info(f"Task {task_id} updated successfully - fields: {updated_fields}")
         return success_response(
             data=task.to_dict(),
             message='Task updated successfully'
         )
         
     except ValidationError as e:
-        # Formatng validation errors properly
-        logger.warning(f"Task update validation failed for task {task_id}.")
-        errors = []
-        print(e.errors())
-        for error in e.errors():
-            errors.append({
-                'field': error['loc'][0] if error['loc'] else 'unknown',
-                'message': error['msg'],
-                'type': error['type']
-            })
-        return error_response('Validation failed', 400, errors=errors)
+        logger.warning(f"Task update validation failed for task {task_id}: {e.errors()}")
+        formatted_errors = format_validation_errors(e)
+        
+        error_message = "Please fix the following errors:"
+        if len(formatted_errors) == 1:
+            error_message = formatted_errors[0]['message']
+        
+        return error_response(
+            message=error_message,
+            status_code=400,
+            errors=formatted_errors)
     
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Failed to update task {task_id} for user {user_id}.")
-        return error_response(f'Failed to update task: {str(e)}', 500)
-
-    
+        logger.error(f"Failed to update task {task_id} for user {user_id}: {str(e)}")
+        return error_response(
+            message='Failed to update task. Please try again.',
+            status_code=500,
+            errors=[{
+                'field': 'general',
+                'message': str(e),
+                'type': 'server_error'
+            }]
+        )
 
 
 # Delete one task of the user
@@ -490,7 +633,7 @@ def bulk_delete():
 
         for task in tasks:
             if task.images:
-                 delete_from_s3(task.images)
+                delete_from_s3(task.images)
             db.session.delete(task)
         db.session.commit()
 
